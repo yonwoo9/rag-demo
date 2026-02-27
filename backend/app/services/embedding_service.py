@@ -21,14 +21,19 @@ def get_embeddings(texts: List[str]) -> List[List[float]]:
     batch_size = 25
 
     for i in range(0, len(texts), batch_size):
-        batch = texts[i:i + batch_size]
-        for text in batch:
-            text = text[:2000]  # embedding-2 最大 token 限制
-            response = client.embeddings.create(
-                model=settings.embedding_model,
-                input=text
-            )
-            all_embeddings.append(response.data[0].embedding)
+        # 截断以满足模型的 token/长度限制
+        batch = [t[:2000] for t in texts[i:i + batch_size]]
+        if not batch:
+            continue
+
+        # 一次请求中发送多个 input，减少 API 调用次数
+        response = client.embeddings.create(
+            model=settings.embedding_model,
+            input=batch,
+        )
+        # SDK 返回的 data 顺序与输入顺序一致
+        for item in response.data:
+            all_embeddings.append(item.embedding)
 
     return all_embeddings
 

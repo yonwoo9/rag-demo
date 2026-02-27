@@ -3,7 +3,7 @@ from fastapi.responses import StreamingResponse
 
 from app.models import ChatRequest, ChatResponse
 from app.services.rag_service import rag_chat_stream, rag_chat
-from app.services.milvus_service import list_documents
+from app.services.milvus_service import get_document_meta
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -13,10 +13,9 @@ def _resolve_doc_name(doc_id: str | None) -> str | None:
     if not doc_id:
         return None
     try:
-        docs = list_documents()
-        for doc in docs:
-            if doc["doc_id"] == doc_id:
-                return doc["doc_name"]
+        meta = get_document_meta(doc_id)
+        if meta:
+            return meta.get("doc_name")
     except Exception:
         pass
     return None

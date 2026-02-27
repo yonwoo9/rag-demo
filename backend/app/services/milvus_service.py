@@ -129,10 +129,16 @@ def search_similar(
 
 
 def list_documents() -> List[Dict[str, Any]]:
-    """获取所有文档列表（去重）"""
+    """获取所有文档列表（去重），避免逐文档 N+1 查询
+
+    实现思路：
+    1. 先查询 chunk_index == 0 的记录，拿到每个文档的基础信息（1 条/文档）
+    2. 再用 doc_id in [...] 一次性查询所有文档的 chunk_index，统计 chunk 数量
+    """
     client = get_milvus_client()
     try:
-        results = client.query(
+        # 步骤 1：每个文档一条“头块”记录
+        headers = client.query(
             collection_name=settings.collection_name,
             filter="chunk_index == 0",
             output_fields=["doc_id", "doc_name", "doc_type", "created_at"],
@@ -141,23 +147,75 @@ def list_documents() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
-    # 统计每个文档的 chunk 数
-    docs = []
-    for item in results:
-        count_result = client.query(
+    if not headers:
+        return []
+
+    # 所有文档 ID 列表
+    doc_ids = [h["doc_id"] for h in headers]
+
+    # 步骤 2：一次性查询所有相关文档的 chunk_index，并在内存中聚合统计
+    # 表达式示例：doc_id in ["id1", "id2", ...]
+    id_list_expr = ", ".join(f'"{doc_id}"' for doc_id in doc_ids)
+    try:
+        # Milvus 对 limit 有上限（通常为 16384），这里取一个安全上限
+        chunks = client.query(
             collection_name=settings.collection_name,
-            filter=f'doc_id == "{item["doc_id"]}"',
-            output_fields=["chunk_index"],
-            limit=10000
+            filter=f"doc_id in [{id_list_expr}]",
+            output_fields=["doc_id", "chunk_index"],
+            limit=16_384,
         )
-        docs.append({
-            "doc_id": item["doc_id"],
-            "doc_name": item["doc_name"],
-            "doc_type": item.get("doc_type", "unknown"),
-            "chunk_count": len(count_result),
-            "created_at": item.get("created_at", "")
-        })
+    except Exception:
+        # 如果统计失败，至少返回基础文档信息（chunk_count 退化为 1）
+        return [
+            {
+                "doc_id": h["doc_id"],
+                "doc_name": h["doc_name"],
+                "doc_type": h.get("doc_type", "unknown"),
+                "chunk_count": 1,
+                "created_at": h.get("created_at", ""),
+            }
+            for h in headers
+        ]
+
+    # 统计每个文档的块数量
+    counts: Dict[str, int] = {}
+    for item in chunks:
+        did = item.get("doc_id")
+        if not did:
+            continue
+        counts[did] = counts.get(did, 0) + 1
+
+    docs: List[Dict[str, Any]] = []
+    for h in headers:
+        did = h["doc_id"]
+        docs.append(
+            {
+                "doc_id": did,
+                "doc_name": h["doc_name"],
+                "doc_type": h.get("doc_type", "unknown"),
+                "chunk_count": counts.get(did, 0),
+                "created_at": h.get("created_at", ""),
+            }
+        )
     return docs
+
+
+def get_document_meta(doc_id: str) -> Dict[str, Any] | None:
+    """获取单个文档的基础元信息（主要用于根据 doc_id 查 doc_name）"""
+    client = get_milvus_client()
+    try:
+        results = client.query(
+            collection_name=settings.collection_name,
+            filter=f'doc_id == "{doc_id}" and chunk_index == 0',
+            output_fields=["doc_id", "doc_name", "doc_type", "created_at"],
+            limit=1,
+        )
+    except Exception:
+        return None
+
+    if not results:
+        return None
+    return results[0]
 
 
 def delete_document(doc_id: str) -> bool:
