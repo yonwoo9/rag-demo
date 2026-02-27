@@ -10,6 +10,19 @@ interface MessageBubbleProps {
 
 export function MessageBubble({ message }: MessageBubbleProps) {
   const [showSources, setShowSources] = React.useState(false)
+
+  // 系统提示：范围切换分隔线
+  if (message.role === 'system') {
+    return (
+      <div className="flex items-center gap-3 py-1 select-none">
+        <div className="flex-1 border-t border-dashed border-gray-200" />
+        <span className="text-xs text-gray-400 bg-gray-50 px-2.5 py-1 rounded-full border border-gray-200 whitespace-nowrap flex-shrink-0">
+          {message.content}
+        </span>
+        <div className="flex-1 border-t border-dashed border-gray-200" />
+      </div>
+    )
+  }
   const isUser = message.role === 'user'
 
   return (

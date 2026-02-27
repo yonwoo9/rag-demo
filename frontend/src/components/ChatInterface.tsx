@@ -27,6 +27,8 @@ export function ChatInterface() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const stopRef = useRef<(() => void) | null>(null)
   const selectorRef = useRef<HTMLDivElement>(null)
+  // 记录上一次的检索范围，用于检测切换
+  const prevSelectedDocRef = useRef<SelectedDoc | null | undefined>(undefined)
 
   // 加载文档列表
   useEffect(() => {
@@ -48,6 +50,51 @@ export function ChatInterface() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  // 检索范围切换时：停止正在生成的内容，清除旧对话，插入分隔系统消息
+  useEffect(() => {
+    // undefined 表示初次挂载，跳过
+    if (prevSelectedDocRef.current === undefined) {
+      prevSelectedDocRef.current = selectedDoc
+      return
+    }
+    // 范围未变化，跳过
+    if (prevSelectedDocRef.current?.doc_id === selectedDoc?.doc_id) {
+      prevSelectedDocRef.current = selectedDoc
+      return
+    }
+
+    // 停止正在进行的流式输出
+    if (stopRef.current) {
+      stopRef.current()
+      stopRef.current = null
+      setIsLoading(false)
+    }
+
+    const scopeLabel = selectedDoc
+      ? `已切换至《${selectedDoc.doc_name}》`
+      : '已切换至全部文档'
+
+    // 保留当前对话记录，仅追加分隔线 + 清除之前的 user/assistant 上下文
+    setMessages((prev) => {
+      // 如果之前没有对话，不插入分隔线
+      if (prev.filter((m) => m.role !== 'system').length === 0) {
+        prevSelectedDocRef.current = selectedDoc
+        return prev
+      }
+      return [
+        ...prev,
+        {
+          id: newId(),
+          role: 'system' as const,
+          content: `${scopeLabel}，以下为新对话`,
+        },
+      ]
+    })
+
+    prevSelectedDocRef.current = selectedDoc
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDoc])
+
   const handleSend = useCallback(() => {
     const text = input.trim()
     if (!text || isLoading) return
@@ -66,10 +113,15 @@ export function ChatInterface() {
     setInput('')
     setIsLoading(true)
 
-    const allMessages = [...messages, userMsg]
+    // 只取最后一个 system 分隔线之后的 user/assistant 消息作为上下文
+    const allWithUser = [...messages, userMsg]
+    const lastSysIdx = allWithUser.map((m) => m.role).lastIndexOf('system')
+    const contextMessages = allWithUser
+      .slice(lastSysIdx + 1)
+      .filter((m) => m.role !== 'system')
 
     const stop = streamChat(
-      allMessages,
+      contextMessages,
       topK,
       selectedDoc?.doc_id ?? null,
       {
