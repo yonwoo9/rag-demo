@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import List, AsyncGenerator, Optional
 from zhipuai import ZhipuAI
@@ -43,7 +44,7 @@ async def rag_chat_stream(
     doc_id: Optional[str] = None,
     doc_name: Optional[str] = None
 ) -> AsyncGenerator[str, None]:
-    """RAG 流式问答"""
+    """RAG 流式问答：embedding/检索在线程池运行，GLM 流式通过队列桥接"""
     client = ZhipuAI(api_key=settings.zhipu_api_key)
 
     user_question = ""
@@ -52,39 +53,65 @@ async def rag_chat_stream(
             user_question = msg["content"]
             break
 
-    search_results = []
-    sources = []
+    # ① 异步执行阻塞的 embedding + 向量检索
+    search_results: List[dict] = []
+    sources: List[dict] = []
     if user_question:
-        query_embedding = get_embedding(user_question)
-        search_results = search_similar(query_embedding, top_k=top_k, doc_id=doc_id)
-        search_results = [r for r in search_results if r["score"] > 0.3]
+        query_embedding = await asyncio.to_thread(get_embedding, user_question)
+        raw = await asyncio.to_thread(search_similar, query_embedding, top_k, doc_id)
+        search_results = [r for r in raw if r["score"] > 0.3]
         sources = [
-            {"doc_name": r["doc_name"], "content": r["content"][:200], "score": round(r["score"], 4)}
+            {
+                "doc_name": r["doc_name"],
+                "content": r["content"][:200],
+                "score": round(r["score"], 4),
+            }
             for r in search_results
         ]
 
     context = _build_context(search_results)
     system_prompt = _build_system_prompt(context, doc_name)
-
     history = [
-        {"role": msg["role"], "content": msg["content"]}
-        for msg in messages[-10:]
+        {"role": m["role"], "content": m["content"]}
+        for m in messages[-10:]
     ]
 
-    yield f"data: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
+    # ② 先推送 sources
+    yield f"data: {json.dumps({'type': 'sources', 'sources': sources}, ensure_ascii=False)}\n\n"
 
-    response = client.chat.completions.create(
-        model=settings.chat_model,
-        messages=[{"role": "system", "content": system_prompt}] + history,
-        stream=True,
-        temperature=0.7,
-        max_tokens=2048
-    )
+    # ③ 同步 GLM 流式迭代 → 线程池 + asyncio.Queue → 异步 yield
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
 
-    for chunk in response:
-        if chunk.choices and chunk.choices[0].delta.content:
-            content = chunk.choices[0].delta.content
-            yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
+    def _glm_stream_worker() -> None:
+        """在线程池中运行同步 GLM 流式调用，把每个 token 放入队列"""
+        try:
+            response = client.chat.completions.create(
+                model=settings.chat_model,
+                messages=[{"role": "system", "content": system_prompt}] + history,
+                stream=True,
+                temperature=0.7,
+                max_tokens=2048,
+            )
+            for chunk in response:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    loop.call_soon_threadsafe(queue.put_nowait, delta.content)
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)  # 结束哨兵
+
+    loop.run_in_executor(None, _glm_stream_worker)
+
+    # 逐 token yield 给 FastAPI StreamingResponse
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+        if isinstance(item, Exception):
+            raise item
+        yield f"data: {json.dumps({'type': 'content', 'content': item}, ensure_ascii=False)}\n\n"
 
     yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
@@ -95,7 +122,7 @@ async def rag_chat(
     doc_id: Optional[str] = None,
     doc_name: Optional[str] = None
 ) -> dict:
-    """RAG 非流式问答"""
+    """RAG 非流式问答（用于 /api/chat/ 接口）"""
     client = ZhipuAI(api_key=settings.zhipu_api_key)
 
     user_question = ""
@@ -104,33 +131,34 @@ async def rag_chat(
             user_question = msg["content"]
             break
 
-    search_results = []
+    search_results: List[dict] = []
     if user_question:
-        query_embedding = get_embedding(user_question)
-        search_results = search_similar(query_embedding, top_k=top_k, doc_id=doc_id)
-        search_results = [r for r in search_results if r["score"] > 0.3]
+        query_embedding = await asyncio.to_thread(get_embedding, user_question)
+        raw = await asyncio.to_thread(search_similar, query_embedding, top_k, doc_id)
+        search_results = [r for r in raw if r["score"] > 0.3]
 
     context = _build_context(search_results)
     system_prompt = _build_system_prompt(context, doc_name)
-
     history = [
-        {"role": msg["role"], "content": msg["content"]}
-        for msg in messages[-10:]
+        {"role": m["role"], "content": m["content"]}
+        for m in messages[-10:]
     ]
 
-    response = client.chat.completions.create(
-        model=settings.chat_model,
-        messages=[{"role": "system", "content": system_prompt}] + history,
-        temperature=0.7,
-        max_tokens=2048
+    response = await asyncio.to_thread(
+        lambda: client.chat.completions.create(
+            model=settings.chat_model,
+            messages=[{"role": "system", "content": system_prompt}] + history,
+            temperature=0.7,
+            max_tokens=2048,
+        )
     )
 
     sources = [
-        {"doc_name": r["doc_name"], "content": r["content"][:200], "score": round(r["score"], 4)}
+        {
+            "doc_name": r["doc_name"],
+            "content": r["content"][:200],
+            "score": round(r["score"], 4),
+        }
         for r in search_results
     ]
-
-    return {
-        "answer": response.choices[0].message.content,
-        "sources": sources
-    }
+    return {"answer": response.choices[0].message.content, "sources": sources}
