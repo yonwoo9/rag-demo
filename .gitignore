@@ -1,0 +1,67 @@
+# ========================
+# Python / 后端
+# ========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 虚拟环境
+venv/
+.venv/
+env/
+.env/
+
+# 环境变量（含 API Key，严禁提交）
+.env
+backend/.env
+
+# Milvus 本地数据库
+*.db
+volumes/
+backend/milvus_data.db
+
+# 上传的临时文件
+backend/uploads/
+
+# 日志
+*.log
+logs/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# ========================
+# Node.js / 前端
+# ========================
+node_modules/
+frontend/node_modules/
+
+# 构建产物
+dist/
+frontend/dist/
+frontend/.vite/
+
+# ========================
+# macOS / 编辑器
+# ========================
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ========================
+# Docker
+# ========================
+volumes/
